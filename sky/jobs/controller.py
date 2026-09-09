@@ -224,6 +224,13 @@ class JobController:
       task).
     """
 
+    # Set once the jobs launched from this job (dynamic job group members)
+    # have been swept, so the job-group sweep and run()'s completion backstop
+    # don't signal them twice. A class default rather than an __init__
+    # assignment so that controllers built without __init__ (tests) still
+    # have it.
+    _dynamic_members_swept: bool = False
+
     def __init__(
         self,
         job_id: int,
@@ -2312,6 +2319,16 @@ class JobController:
                                 primary_task_succeeded(tid)
                                 for tid in primary_task_ids)
 
+                            # Jobs launched from this group are auxiliary
+                            # members too: swept now, with no termination
+                            # delay, whether or not the group declared any
+                            # auxiliary tasks.
+                            await self._cancel_dynamic_members(
+                                'with job group '
+                                f'{self._job_id}: all primary tasks '
+                                f'{"finished" if all_primary_succeeded else "ended (a primary task failed)"}'  # pylint: disable=line-too-long
+                            )
+
                             # Terminate remaining auxiliary jobs
                             if monitor_async_tasks:
                                 await self._terminate_auxiliary_jobs(
@@ -2580,6 +2597,13 @@ class JobController:
                         msg)
                     attempt_done = True
         finally:
+            if not cancelled:
+                # Jobs launched from this job go down with it when it
+                # finishes on its own. A user cancel already took the whole
+                # subtree server-side (cancel_jobs_by_id expands to
+                # descendants), so nothing to do in that case.
+                await self._cancel_dynamic_members(
+                    f'with job {self._job_id}: it finished')
             callback_func = managed_job_utils.event_callback_func(
                 job_id=self._job_id,
                 task_id=task_id,
@@ -2593,6 +2617,28 @@ class JobController:
                 # the resources first so this will be done later.
                 await managed_job_state.set_cancelled_async(
                     job_id=self._job_id, callback_func=callback_func)
+
+    async def _cancel_dynamic_members(self, note: str) -> None:
+        """Cancel the jobs launched from this job (dynamic job group members).
+
+        Idempotent per controller: the job-group primaries-done sweep and
+        run()'s completion backstop may both reach here. Best-effort: a
+        failure to sweep must never change this job's own final state.
+        """
+        if self._dynamic_members_swept:
+            return
+        self._dynamic_members_swept = True
+        try:
+            msg = await asyncio.to_thread(
+                managed_job_utils.cancel_descendant_jobs, self._job_id, note)
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning(
+                'Failed to cancel jobs launched from job '
+                f'{self._job_id}: {common_utils.format_exception(e)}')
+            return
+        if msg != 'No job to cancel.':
+            logger.info(f'Cancelling jobs launched from job {self._job_id}: '
+                        f'{msg}')
 
     async def _handle_unexpected_error(
             self, error: Union[Exception, SystemExit]) -> Optional[str]:

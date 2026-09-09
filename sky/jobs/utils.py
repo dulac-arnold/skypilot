@@ -1516,6 +1516,10 @@ class CancelRequestInfo:
     user_hash: Optional[str] = None
     user_name: Optional[str] = None
     request_id: Optional[str] = None
+    # Why SkyPilot itself cancelled the job, when no user asked for it (e.g.
+    # a job group sweeping the jobs launched from it once its primary tasks
+    # finished). Appended to the event reason.
+    note: Optional[str] = None
 
     @classmethod
     def from_request_context(cls) -> Optional['CancelRequestInfo']:
@@ -1542,7 +1546,7 @@ class CancelRequestInfo:
         # The hash is the fallback identity: a user row (and so the display
         # name) may be missing on the controller side.
         who = self.user_name or self.user_hash
-        if who is None and self.request_id is None:
+        if who is None and self.request_id is None and self.note is None:
             return None
         # The queue finds this event by its prefix to surface the requester
         # in the job's `details` (see
@@ -1554,6 +1558,8 @@ class CancelRequestInfo:
             reason = prefix
         if self.request_id is not None:
             reason += f' (request ID: {self.request_id})'
+        if self.note is not None:
+            reason += f' {self.note}'
         return reason
 
 
@@ -1573,6 +1579,37 @@ def _record_cancel_request_event(job_id: int, reason: Optional[str]) -> None:
     except Exception as e:  # pylint: disable=broad-except
         logger.warning(f'Failed to record the cancel request event for job '
                        f'{job_id}: {common_utils.format_exception(e)}')
+
+
+def _jobs_launched_from(
+        job_ids: List[int]) -> Tuple[List[int], Dict[int, Optional[int]]]:
+    """Every job launched, at any depth, from any of ``job_ids``.
+
+    One query for the trees the ids belong to (rows sharing their roots), then
+    the subtrees are picked out in memory from the parent edges. Returns the
+    descendant ids (parents before children, none of the requested ids among
+    them) and each descendant's parent, for attribution.
+    """
+    children: Dict[int, List[int]] = collections.defaultdict(list)
+    for job_id, parent_job_id in managed_job_state.get_jobs_launched_from(
+            job_ids):
+        if parent_job_id is not None:
+            children[parent_job_id].append(job_id)
+    requested = set(job_ids)
+    descendants: List[int] = []
+    parent_of: Dict[int, Optional[int]] = {}
+    frontier = list(job_ids)
+    while frontier:
+        next_frontier: List[int] = []
+        for job_id in frontier:
+            for child in children.get(job_id, []):
+                if child in requested or child in parent_of:
+                    continue
+                parent_of[child] = job_id
+                descendants.append(child)
+                next_frontier.append(child)
+        frontier = next_frontier
+    return descendants, parent_of
 
 
 def cancel_jobs_by_id(
@@ -1602,10 +1639,33 @@ def cancel_jobs_by_id(
     if current_workspace is None:
         current_workspace = constants.SKYPILOT_DEFAULT_WORKSPACE
 
+    # Cancelling a job takes every job launched from it (transitively) with
+    # it: a job launched from inside a managed job records that job as its
+    # parent (dynamic job group members). The requested ids come first so
+    # the result message leads with what the caller asked for. A parent that
+    # is already terminal is skipped below like any other terminal job, but
+    # its still-running descendants are cancelled all the same.
+    requested_job_ids = set(job_ids)
+    descendant_job_ids, parent_of = _jobs_launched_from(job_ids)
+    job_ids = job_ids + descendant_job_ids
+
     if cancel_request_info is None:
         cancel_request_info = CancelRequestInfo.from_request_context()
     cancel_event_reason = (cancel_request_info.event_reason()
                            if cancel_request_info is not None else None)
+
+    def _event_reason_for(job_id: int) -> Optional[str]:
+        """The requester's reason, plus which job a descendant went down with.
+
+        A cascaded cancel is always recorded, even when the requester is
+        unknown: the child's event log must say the cancel came from its
+        parent rather than look like a spontaneous CANCELLING.
+        """
+        if job_id in requested_job_ids:
+            return cancel_event_reason
+        base = (cancel_event_reason if cancel_event_reason is not None else
+                managed_job_state.CANCEL_REQUESTED_EVENT_REASON_PREFIX)
+        return f'{base} (cancelled with job {parent_of[job_id]})'
 
     cancelled_job_ids: List[int] = []
     wrong_workspace_job_ids: List[int] = []
@@ -1637,7 +1697,7 @@ def cancel_jobs_by_id(
         # the job is known to be cancellable and before any of the paths
         # below act on it, so the audit entry precedes the resulting
         # CANCELLING / CANCELLED events.
-        _record_cancel_request_event(job_id, cancel_event_reason)
+        _record_cancel_request_event(job_id, _event_reason_for(job_id))
 
         if job_status == managed_job_state.ManagedJobStatus.PENDING:
             # the "if PENDING" is a short circuit, this will be atomic.
@@ -1702,8 +1762,39 @@ def cancel_jobs_by_id(
         cancelled_job_ids_str = ', '.join(map(str, cancelled_job_ids))
         identity_str = f'Jobs with IDs {cancelled_job_ids_str} are'
 
-    msg = f'{identity_str} scheduled to be cancelled.{wrong_workspace_job_str}'
+    cascade_str = ''
+    cancelled_descendants = [
+        job_id for job_id in cancelled_job_ids if job_id in descendant_job_ids
+    ]
+    if cancelled_descendants:
+        plural = 's' if len(cancelled_descendants) > 1 else ''
+        cascade_str = (f' This includes {len(cancelled_descendants)} job'
+                       f'{plural} launched from the cancelled job'
+                       f'{"s" if len(requested_job_ids) > 1 else ""}.')
+
+    msg = (f'{identity_str} scheduled to be cancelled.{cascade_str}'
+           f'{wrong_workspace_job_str}')
     return msg
+
+
+def cancel_descendant_jobs(job_id: int, note: str) -> str:
+    """Cancel every job launched (transitively) from ``job_id``, not the job.
+
+    Used by the controller when a job's primary tasks have all finished:
+    jobs launched from it are dynamic auxiliary members and are swept with
+    the declared auxiliaries (no termination delay). ``note`` says why, for
+    the descendants' event logs.
+    """
+    # Only the direct children are requested; cancel_jobs_by_id expands to
+    # the rest of the subtree and attributes each level to its own parent.
+    descendants, parent_of = _jobs_launched_from([job_id])
+    children_job_ids = [d for d in descendants if parent_of[d] == job_id]
+    if not children_job_ids:
+        return 'No job to cancel.'
+    return cancel_jobs_by_id(
+        children_job_ids,
+        current_workspace=managed_job_state.get_workspace(job_id),
+        cancel_request_info=CancelRequestInfo(note=note))
 
 
 def cancel_job_by_name(
