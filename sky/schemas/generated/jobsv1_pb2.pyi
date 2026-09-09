@@ -272,7 +272,7 @@ class GetJobExitCodesResponse(_message.Message):
     def __init__(self, exit_codes: _Optional[_Iterable[int]] = ...) -> None: ...
 
 class SetJobInfoWithoutJobIdRequest(_message.Message):
-    __slots__ = ("name", "workspace", "entrypoint", "pool", "pool_hash", "user_hash", "task_ids", "task_names", "resources_str", "metadata_jsons", "num_jobs", "execution", "is_primary_in_job_groups")
+    __slots__ = ("name", "workspace", "entrypoint", "pool", "pool_hash", "user_hash", "task_ids", "task_names", "resources_str", "metadata_jsons", "num_jobs", "execution", "is_primary_in_job_groups", "parent_job_id", "parent_task_id", "root_job_id")
     NAME_FIELD_NUMBER: _ClassVar[int]
     WORKSPACE_FIELD_NUMBER: _ClassVar[int]
     ENTRYPOINT_FIELD_NUMBER: _ClassVar[int]
@@ -286,6 +286,9 @@ class SetJobInfoWithoutJobIdRequest(_message.Message):
     NUM_JOBS_FIELD_NUMBER: _ClassVar[int]
     EXECUTION_FIELD_NUMBER: _ClassVar[int]
     IS_PRIMARY_IN_JOB_GROUPS_FIELD_NUMBER: _ClassVar[int]
+    PARENT_JOB_ID_FIELD_NUMBER: _ClassVar[int]
+    PARENT_TASK_ID_FIELD_NUMBER: _ClassVar[int]
+    ROOT_JOB_ID_FIELD_NUMBER: _ClassVar[int]
     name: str
     workspace: str
     entrypoint: str
@@ -299,7 +302,10 @@ class SetJobInfoWithoutJobIdRequest(_message.Message):
     num_jobs: int
     execution: str
     is_primary_in_job_groups: _containers.RepeatedScalarFieldContainer[bool]
-    def __init__(self, name: _Optional[str] = ..., workspace: _Optional[str] = ..., entrypoint: _Optional[str] = ..., pool: _Optional[str] = ..., pool_hash: _Optional[str] = ..., user_hash: _Optional[str] = ..., task_ids: _Optional[_Iterable[int]] = ..., task_names: _Optional[_Iterable[str]] = ..., resources_str: _Optional[str] = ..., metadata_jsons: _Optional[_Iterable[str]] = ..., num_jobs: _Optional[int] = ..., execution: _Optional[str] = ..., is_primary_in_job_groups: _Optional[_Iterable[bool]] = ...) -> None: ...
+    parent_job_id: int
+    parent_task_id: int
+    root_job_id: int
+    def __init__(self, name: _Optional[str] = ..., workspace: _Optional[str] = ..., entrypoint: _Optional[str] = ..., pool: _Optional[str] = ..., pool_hash: _Optional[str] = ..., user_hash: _Optional[str] = ..., task_ids: _Optional[_Iterable[int]] = ..., task_names: _Optional[_Iterable[str]] = ..., resources_str: _Optional[str] = ..., metadata_jsons: _Optional[_Iterable[str]] = ..., num_jobs: _Optional[int] = ..., execution: _Optional[str] = ..., is_primary_in_job_groups: _Optional[_Iterable[bool]] = ..., parent_job_id: _Optional[int] = ..., parent_task_id: _Optional[int] = ..., root_job_id: _Optional[int] = ...) -> None: ...
 
 class SetJobInfoWithoutJobIdResponse(_message.Message):
     __slots__ = ("job_ids",)

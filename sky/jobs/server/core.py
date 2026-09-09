@@ -421,7 +421,10 @@ def _maybe_submit_job_locally(
         prefix: str,
         dag: 'sky.Dag',
         num_jobs: int,
-        file_mounts_blob_id: Optional[str] = None) -> Optional[List[int]]:
+        file_mounts_blob_id: Optional[str] = None,
+        parent_job_id: Optional[int] = None,
+        parent_task_id: Optional[int] = None,
+        root_job_id: Optional[int] = None) -> Optional[List[int]]:
     """Submit the managed job locally if in consolidation mode.
 
     In normal mode the managed job submission is done in the ray job submission.
@@ -471,7 +474,10 @@ def _maybe_submit_job_locally(
                 user_hash=common_utils.get_user_hash(),
                 execution=execution_mode,
                 is_batch=is_batch,
-                file_mounts_blob_id=file_mounts_blob_id))
+                file_mounts_blob_id=file_mounts_blob_id,
+                parent_job_id=parent_job_id,
+                parent_task_id=parent_task_id,
+                root_job_id=root_job_id))
         for task_id, task in enumerate(dag.tasks):
             resources_str = backend_utils.get_task_resources_str(
                 task, is_managed_job=True)
@@ -569,7 +575,10 @@ def _ensure_controller_up(
 def _submit_remotely(controller: controller_utils.Controllers,
                      dag: 'sky.Dag',
                      pool: Optional[str] = None,
-                     num_jobs: int = 1) -> List[int]:
+                     num_jobs: int = 1,
+                     parent_job_id: Optional[int] = None,
+                     parent_task_id: Optional[int] = None,
+                     root_job_id: Optional[int] = None) -> List[int]:
     # Ensure the controller is up before trying to create job IDs
     # Use the same cloud as the tasks for the controller
     task_resources = None
@@ -635,8 +644,54 @@ def _submit_remotely(controller: controller_utils.Controllers,
         num_jobs=num_jobs,
         execution=execution_mode,
         is_primary_in_job_groups=(is_primary_in_job_groups),
-        is_batch=is_batch)
+        is_batch=is_batch,
+        parent_job_id=parent_job_id,
+        parent_task_id=parent_task_id,
+        root_job_id=root_job_id)
     return job_ids
+
+
+def _validate_parent_job(parent_job_id: Optional[int],
+                         parent_task_id: Optional[int]) -> None:
+    """Check the managed job a dynamic member is about to attach to.
+
+    Only checked in consolidation mode, where the managed-jobs state lives on
+    the API server. With a remote jobs controller the link is recorded
+    unchecked: the state is on the controller and a round trip for a
+    pre-check is not worth adding to that legacy path.
+
+    Raises:
+        ValueError: the parent does not exist, is being cancelled or is
+            cancelled, or is not in the active workspace.
+    """
+    if parent_job_id is None:
+        if parent_task_id is not None:
+            with ux_utils.print_exception_no_traceback():
+                raise ValueError('parent_task_id requires parent_job_id.')
+        return
+    if not managed_job_utils.is_consolidation_mode():
+        logger.debug(f'Skipping parent job {parent_job_id} validation: '
+                     'not in consolidation mode.')
+        return
+    status = managed_job_state.get_status(parent_job_id)
+    if status is None:
+        with ux_utils.print_exception_no_traceback():
+            raise ValueError(f'Cannot attach to job {parent_job_id}: no such '
+                             'managed job.')
+    if status in (managed_job_state.ManagedJobStatus.CANCELLING,
+                  managed_job_state.ManagedJobStatus.CANCELLED):
+        with ux_utils.print_exception_no_traceback():
+            raise ValueError(f'Cannot attach to job {parent_job_id}: it is '
+                             f'{status.value}.')
+    parent_rows, _ = managed_job_state.get_managed_jobs_with_filters(
+        job_ids=[parent_job_id], fields=['job_id', 'workspace'])
+    parent_workspace = parent_rows[0].get('workspace') if parent_rows else None
+    active_workspace = skypilot_config.get_active_workspace()
+    if parent_workspace is not None and parent_workspace != active_workspace:
+        with ux_utils.print_exception_no_traceback():
+            raise ValueError(f'Cannot attach to job {parent_job_id}: it is in '
+                             f'workspace {parent_workspace!r}, not the active '
+                             f'workspace {active_workspace!r}.')
 
 
 def _create_job_api_token(creator_user_id: str, job_name: Optional[str],
@@ -682,6 +737,9 @@ def launch(
     num_jobs: Optional[int] = None,
     stream_logs: bool = True,
     file_mounts_blob_id: Optional[str] = None,
+    parent_job_id: Optional[int] = None,
+    parent_task_id: Optional[int] = None,
+    root_job_id: Optional[int] = None,
 ) -> Tuple[Optional[Union[int, List[int]]], Optional[backends.ResourceHandle]]:
     # NOTE(dev): Keep the docstring consistent between the Python API and CLI.
     """Launches a managed job.
@@ -692,6 +750,13 @@ def launch(
         task: sky.Task, or sky.Dag (experimental; 1-task only) to launch as a
           managed job.
         name: Name of the managed job.
+        parent_job_id: Managed job to attach this job to as a dynamic member
+          (it is shown under that job and cancelled with it). None for a
+          top-level job.
+        parent_task_id: Task within the parent that launched this job, when
+          known. Recorded for display only.
+        root_job_id: Top-level job of the parent's tree (the parent itself
+          when it is top-level). Defaults to the parent.
 
     Raises:
         ValueError: cluster does not exist. Or, the entrypoint is not a valid
@@ -737,6 +802,9 @@ def launch(
         with ux_utils.print_exception_no_traceback():
             raise ValueError('Job Groups do not support pools. Please remove '
                              'the --pool argument when launching a job group.')
+    _validate_parent_job(parent_job_id, parent_task_id)
+    if parent_job_id is not None and root_job_id is None:
+        root_job_id = parent_job_id
     dag.validate()
     # TODO(aylei): use consolidated job controller instead of performing
     # pre-mount operations when submitting jobs.
@@ -921,10 +989,19 @@ def launch(
     job_ids = _maybe_submit_job_locally(prefix,
                                         dag,
                                         num_jobs,
-                                        file_mounts_blob_id=file_mounts_blob_id)
+                                        file_mounts_blob_id=file_mounts_blob_id,
+                                        parent_job_id=parent_job_id,
+                                        parent_task_id=parent_task_id,
+                                        root_job_id=root_job_id)
     is_consolidation_mode = job_ids is not None
     if not is_consolidation_mode:
-        job_ids = _submit_remotely(controller, dag, pool, num_jobs)
+        job_ids = _submit_remotely(controller,
+                                   dag,
+                                   pool,
+                                   num_jobs,
+                                   parent_job_id=parent_job_id,
+                                   parent_task_id=parent_task_id,
+                                   root_job_id=root_job_id)
     assert job_ids is not None, 'job_ids is not set'
 
     # This is only needed for non-consolidation mode. For consolidation

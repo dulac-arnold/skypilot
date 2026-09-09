@@ -308,12 +308,21 @@ class JobController:
                 is_managed_job=True)
             job_id_env_vars.append(job_id_env_var)
 
+        # The top-level job of this job's tree (itself, unless this job was
+        # launched from another). A job launched from a task inherits it as
+        # its root, so the root travels with the job instead of being looked
+        # up at every child launch.
+        root_job_id = managed_job_state.get_root_job_id(self._job_id)
+        if root_job_id is None:
+            root_job_id = self._job_id
+
         for i, task in enumerate(self._dag.tasks):
             task_envs = task.envs or {}
             task_envs[constants.TASK_ID_ENV_VAR] = job_id_env_vars[i]
             task_envs[constants.TASK_ID_LIST_ENV_VAR] = '\n'.join(
                 job_id_env_vars)
             task_envs[constants.MANAGED_JOB_ID_ENV_VAR] = str(self._job_id)
+            task_envs[constants.ROOT_JOB_ID_ENV_VAR] = str(root_job_id)
             # Add SKYPILOT_JOB_RANK if it's set in the context or os.environ
             # (os.environ may be hijacked to use ContextualEnviron which includes context overrides)
             if self._rank is not None:

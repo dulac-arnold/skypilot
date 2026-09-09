@@ -1260,7 +1260,10 @@ class JobLibCodeGen:
                                     is_primary_in_job_groups: List[bool],
                                     execution: str,
                                     num_jobs: int = 1,
-                                    is_batch: bool = False) -> str:
+                                    is_batch: bool = False,
+                                    parent_job_id: Optional[int] = None,
+                                    parent_task_id: Optional[int] = None,
+                                    root_job_id: Optional[int] = None) -> str:
         pool_str = f'{pool!r}' if pool is not None else 'None'
         pool_hash_str = f'{pool_hash!r}' if pool_hash is not None else 'None'
         user_hash_str = f'{user_hash!r}' if user_hash is not None else 'None'
@@ -1285,7 +1288,23 @@ class JobLibCodeGen:
                        f'pool_hash={pool_hash_str},'
                        f'user_hash={user_hash_str},'
                        f'execution={execution!r}')
-        if is_batch:
+        if parent_job_id is not None:
+            # Dynamic job group member: the parent link columns exist on
+            # controllers >= 41. An older controller must fail loudly rather
+            # than silently record a top-level job.
+            set_job_info_code = (
+                '\n  if int(constants.SKYLET_VERSION) < 41:'
+                '\n    raise RuntimeError('
+                '"The jobs controller does not support attaching jobs to a '
+                'job group. Please update it with: '
+                'sky jobs controller up --yes")'
+                '\n  job_id = managed_job_state.set_job_info_without_job_id('
+                f'{base_kwargs},'
+                f'is_batch={is_batch!r},'
+                f'parent_job_id={parent_job_id!r},'
+                f'parent_task_id={parent_task_id!r},'
+                f'root_job_id={root_job_id!r})')
+        elif is_batch:
             set_job_info_code = (
                 '\n  if int(constants.SKYLET_VERSION) < 36:'
                 '\n    raise RuntimeError('

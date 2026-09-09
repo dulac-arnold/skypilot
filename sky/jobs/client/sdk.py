@@ -1,5 +1,6 @@
 """SDK functions for managed jobs."""
 import json
+import os
 import pathlib
 import threading
 import typing
@@ -42,6 +43,98 @@ if typing.TYPE_CHECKING:
 logger = sky_logging.init_logger(__name__)
 
 
+class _AutoJobGroup:
+    """Sentinel for ``launch(job_group=...)``: attach to the surrounding job
+    group when launched from inside one, otherwise launch a top-level job."""
+
+    def __repr__(self) -> str:
+        return 'AUTO_JOB_GROUP'
+
+
+AUTO_JOB_GROUP = _AutoJobGroup()
+
+
+def _resolve_job_group(
+    job_group: Union[int, str, None, _AutoJobGroup]
+) -> Tuple[Optional[int], Optional[int], Optional[int], bool]:
+    """Turn ``job_group`` into ``(parent_job_id, parent_task_id, root_job_id,
+    explicit)``.
+
+    ``explicit`` is False only for the automatic case, where a missing or
+    too-old server silently launches a top-level job instead of erroring.
+
+    - ``AUTO_JOB_GROUP``: when running inside a job group's task (the
+      controller sets ``SKYPILOT_JOBGROUP_NAME`` on every member), attach to
+      that job group: the parent is ``SKYPILOT_MANAGED_JOB_ID``, the root is
+      ``SKYPILOT_ROOT_JOB_ID`` (the parent's own root, so the tree stays
+      flat under one top-level job), and the launching task index is the
+      ``-<task_id>`` suffix of ``SKYPILOT_TASK_ID``. Outside a job group, no
+      attachment (a plain managed job launching nested jobs keeps today's
+      behavior).
+    - ``None``: never attach.
+    - ``int``: attach to that managed job; its root is read from its record.
+    - ``str``: a managed job name, resolved to exactly one running job (or a
+      decimal job id).
+    """
+    if job_group is None:
+        return None, None, None, True
+    if isinstance(job_group, _AutoJobGroup):
+        in_job_group = bool(
+            os.environ.get(
+                managed_job_constants.SKYPILOT_JOBGROUP_NAME_ENV_VAR))
+        parent_str = os.environ.get(constants.MANAGED_JOB_ID_ENV_VAR)
+        if not in_job_group or not parent_str:
+            return None, None, None, False
+        parent_job_id = int(parent_str)
+        root_str = os.environ.get(constants.ROOT_JOB_ID_ENV_VAR, '')
+        root_job_id = int(root_str) if root_str.isdigit() else parent_job_id
+        parent_task_id: Optional[int] = None
+        task_id_str = os.environ.get(constants.TASK_ID_ENV_VAR, '')
+        # Format: <timestamp>_<name>_<job_id>-<task_id>; the task suffix is
+        # only present for managed jobs (see common_utils.get_global_job_id).
+        suffix = task_id_str.rsplit('-', 1)[-1] if '-' in task_id_str else ''
+        if suffix.isdigit():
+            parent_task_id = int(suffix)
+        return parent_job_id, parent_task_id, root_job_id, False
+    if isinstance(job_group, bool):
+        raise ValueError('job_group must be a job id, a job name, None or '
+                         'AUTO_JOB_GROUP.')
+    if isinstance(job_group, str) and job_group.isdigit():
+        job_group = int(job_group)
+    if isinstance(job_group, int):
+        request_id = queue_v2(refresh=False,
+                              job_ids=[job_group],
+                              fields=['job_id', 'root_job_id'])
+        jobs, _, _, _ = sdk.get(request_id)
+        if not jobs:
+            with ux_utils.print_exception_no_traceback():
+                raise ValueError(f'No managed job {job_group} to attach to.')
+        return job_group, None, jobs[0].group_job_id, True
+    if isinstance(job_group, str):
+        request_id = queue_v2(refresh=False,
+                              skip_finished=True,
+                              fields=['job_id', 'job_name', 'root_job_id'])
+        jobs, _, _, _ = sdk.get(request_id)
+        matching = {
+            j.job_id: j.group_job_id
+            for j in jobs
+            if j.job_name == job_group and j.job_id is not None
+        }
+        if not matching:
+            with ux_utils.print_exception_no_traceback():
+                raise ValueError(f'No running managed job named '
+                                 f'{job_group!r} to attach to. Pass the job '
+                                 'id instead.')
+        if len(matching) > 1:
+            with ux_utils.print_exception_no_traceback():
+                raise ValueError(f'{len(matching)} running managed jobs are '
+                                 f'named {job_group!r} ({sorted(matching)}). '
+                                 'Pass the job id instead.')
+        (parent_job_id, root_job_id), = matching.items()
+        return parent_job_id, None, root_job_id, True
+    raise ValueError(f'Unsupported job_group value: {job_group!r}')
+
+
 @context.contextual
 @usage_lib.entrypoint
 @server_common.check_server_healthy_or_start
@@ -50,6 +143,7 @@ def launch(
     name: Optional[str] = None,
     pool: Optional[str] = None,
     num_jobs: Optional[int] = None,
+    job_group: Union[int, str, None, _AutoJobGroup] = AUTO_JOB_GROUP,
     # Internal only:
     # pylint: disable=invalid-name
     _need_confirmation: bool = False,
@@ -63,6 +157,12 @@ def launch(
         task: sky.Task, or sky.Dag (experimental; 1-task only) to launch as a
             managed job.
         name: Name of the managed job.
+        job_group: Managed job to attach this job to as a dynamic member: it
+            is shown under that job and cancelled with it. Defaults to the
+            surrounding job group when called from inside one (and to no
+            attachment otherwise). Pass ``None`` to launch a top-level job
+            even from inside a job group, or a job id / unique running job
+            name to attach explicitly.
         _need_confirmation: (Internal only) Whether to show a confirmation
             prompt before launching the job.
 
@@ -89,6 +189,22 @@ def launch(
 
     if name is not None:
         dag.name = name
+
+    (parent_job_id, parent_task_id, root_job_id,
+     explicit_job_group) = _resolve_job_group(job_group)
+    if parent_job_id is not None and (
+            remote_api_version is None or remote_api_version <
+            server_constants.MIN_JOBS_PARENT_LINK_API_VERSION):
+        if explicit_job_group:
+            raise click.UsageError(
+                'Attaching a job to a job group is not supported by your API '
+                'server. Please upgrade to a newer API server.')
+        logger.debug(
+            'Not attaching to job group %s: API server version too '
+            'old (need >= %s, got %s).', parent_job_id,
+            server_constants.MIN_JOBS_PARENT_LINK_API_VERSION,
+            remote_api_version)
+        parent_job_id, parent_task_id, root_job_id = None, None, None
 
     with admin_policy_utils.apply_and_use_config_in_current_request(
             dag,
@@ -156,6 +272,9 @@ def launch(
             pool=pool,
             num_jobs=num_jobs,
             file_mounts_blob_id=file_mounts_blob_id,
+            parent_job_id=parent_job_id,
+            parent_task_id=parent_task_id,
+            root_job_id=root_job_id,
         )
         response = server_common.make_authenticated_request(
             'POST',

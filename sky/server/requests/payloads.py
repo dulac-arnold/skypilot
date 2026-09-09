@@ -620,6 +620,14 @@ class JobsLaunchBody(RequestBody):
     name: Optional[str]
     pool: Optional[str] = None
     num_jobs: Optional[int] = None
+    # The managed job (and task within it) this job is launched from, when it
+    # should join that job as a dynamic member. None for top-level jobs.
+    parent_job_id: Optional[int] = None
+    parent_task_id: Optional[int] = None
+    # The top-level job of the parent's tree (the parent itself when it is
+    # top-level). Sent by the client, which has it from the parent task's env
+    # or from the parent's record.
+    root_job_id: Optional[int] = None
 
     def to_kwargs(self) -> Dict[str, Any]:
         kwargs = super().to_kwargs()

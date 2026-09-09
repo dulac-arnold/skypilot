@@ -252,6 +252,12 @@ class JobsServiceImpl(jobsv1_pb2_grpc.JobsServiceServicer):
                 'pool_hash') else None
             user_hash = request.user_hash if request.HasField(
                 'user_hash') else None
+            parent_job_id = (request.parent_job_id
+                             if request.HasField('parent_job_id') else None)
+            parent_task_id = (request.parent_task_id
+                              if request.HasField('parent_task_id') else None)
+            root_job_id = (request.root_job_id
+                           if request.HasField('root_job_id') else None)
             # Detect batch coordinator jobs from task metadata so the
             # scheduler can serialize them one-at-a-time per pool.
             is_batch = any(
@@ -269,7 +275,10 @@ class JobsServiceImpl(jobsv1_pb2_grpc.JobsServiceServicer):
                     pool_hash=pool_hash,
                     user_hash=user_hash,
                     execution=execution,
-                    is_batch=is_batch)
+                    is_batch=is_batch,
+                    parent_job_id=parent_job_id,
+                    parent_task_id=parent_task_id,
+                    root_job_id=root_job_id)
                 job_ids.append(job_id)
                 # Set pending state for all tasks
                 for task_id, task_name, metadata_json in zip(

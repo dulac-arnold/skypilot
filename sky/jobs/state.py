@@ -3889,6 +3889,16 @@ def set_job_info(job_id: int,
         session.commit()
 
 
+def get_root_job_id(job_id: int) -> Optional[int]:
+    """``root_job_id`` of a job: None for a top-level (or unknown) job."""
+    engine = _db_manager.get_engine()
+    with orm.Session(engine) as session:
+        row = session.execute(
+            sqlalchemy.select(job_info_table.c.root_job_id).where(
+                job_info_table.c.spot_job_id == job_id)).fetchone()
+    return row[0] if row is not None else None
+
+
 def get_jobs_launched_from(
         job_ids: List[int]) -> List[Tuple[int, Optional[int]]]:
     """(job_id, parent_job_id) for every job under the trees of ``job_ids``.

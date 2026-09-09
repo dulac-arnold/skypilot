@@ -200,6 +200,11 @@ message SetJobInfoWithoutJobIdRequest {
   int32 num_jobs = 11;
   string execution = 12;
   repeated bool is_primary_in_job_groups = 13;
+  // The managed job (and task within it) this job is launched from, when it
+  // joins that job as a dynamic member. Unset for top-level jobs.
+  optional int64 parent_job_id = 14;
+  optional int64 parent_task_id = 15;
+  optional int64 root_job_id = 16;
 }
 
 message SetJobInfoWithoutJobIdResponse {

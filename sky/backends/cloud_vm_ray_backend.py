@@ -4557,6 +4557,9 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         num_jobs: int = 1,
         execution: str = DEFAULT_EXECUTION.value,
         is_batch: bool = False,
+        parent_job_id: Optional[int] = None,
+        parent_task_id: Optional[int] = None,
+        root_job_id: Optional[int] = None,
     ) -> List[int]:
         """Set job info without creating entries in the jobs table.
 
@@ -4581,7 +4584,10 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                     metadata_jsons=metadata_jsons,
                     num_jobs=num_jobs,
                     execution=execution,
-                    is_primary_in_job_groups=is_primary_in_job_groups)
+                    is_primary_in_job_groups=is_primary_in_job_groups,
+                    parent_job_id=parent_job_id,
+                    parent_task_id=parent_task_id,
+                    root_job_id=root_job_id)
                 response = backend_utils.invoke_skylet_with_retries(
                     lambda: SkyletClient(handle.get_grpc_channel()
                                         ).set_job_info_without_job_id(request))
@@ -4605,7 +4611,10 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                 is_primary_in_job_groups=is_primary_in_job_groups,
                 num_jobs=num_jobs,
                 execution=execution,
-                is_batch=is_batch)
+                is_batch=is_batch,
+                parent_job_id=parent_job_id,
+                parent_task_id=parent_task_id,
+                root_job_id=root_job_id)
             returncode, result_str, stderr = self.run_on_head(
                 handle,
                 code,
